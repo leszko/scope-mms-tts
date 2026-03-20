@@ -1,0 +1,17 @@
+[project]
+name = "scope-mms-tts"
+version = "0.1.0"
+description = "MMS VITS text-to-speech plugin for Daydream Scope (Hugging Face transformers)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.entry-points."scope"]
+scope_mms_tts = "scope_mms_tts.plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scope_mms_tts"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
