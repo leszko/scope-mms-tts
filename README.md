@@ -27,7 +27,7 @@ From the Scope app you can also use **Settings → Plugins** and point at a **gi
 
 ## Pipeline
 
-- **ID:** `text_to_speech`
+- **ID:** `mms_tts`
 - **Name:** Text-to-Speech (MMS VITS)
 
 ## License
