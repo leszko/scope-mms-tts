@@ -1,10 +1,16 @@
-"""Text-to-speech pipeline using Hugging Face VitsModel (Meta MMS English by default)."""
+"""Text-to-speech pipeline using Hugging Face VitsModel (Meta MMS English by default).
+
+Audio is split into small chunks and delivered one per __call__ to avoid
+blocking the WebRTC audio thread with a single huge resampling operation.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
 import threading
+import time
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -20,6 +26,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_CHARS = 500
+
+# Maximum chunk duration in seconds. Keeps each WebRTC recv() call fast
+# by limiting the amount of audio resampled in one go.
+_MAX_CHUNK_SECONDS = 2.0
 
 
 def _prompts_to_text(prompts: Any) -> str:
@@ -59,6 +69,9 @@ class MmsTtsPipeline(Pipeline):
         self._load_lock = threading.Lock()
         self._infer_lock = threading.Lock()
         self._last_text: str | None = None
+        self._sample_rate: int = 16000
+        # Queue of audio chunks waiting to be delivered
+        self._audio_queue: deque[torch.Tensor] = deque()
 
     def prepare(self, **kwargs) -> Requirements | None:
         """Text-only: no video frames required (same as diffusion text mode)."""
@@ -77,18 +90,29 @@ class MmsTtsPipeline(Pipeline):
             self._model = VitsModel.from_pretrained(self.model_repo)
             self._model.to(self.device)
             self._model.eval()
+            self._sample_rate = int(self._model.config.sampling_rate)
 
-    def __call__(self, **kwargs) -> dict:
+    def __call__(self, **kwargs) -> dict | None:
+        # Deliver next queued chunk first
+        if self._audio_queue:
+            chunk = self._audio_queue.popleft()
+            return {
+                "audio": chunk,
+                "audio_sample_rate": self._sample_rate,
+            }
+
         text = _prompts_to_text(kwargs.get("prompts"))
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
-            return {}
+            time.sleep(0.05)
+            return None
 
         if len(text) > _MAX_CHARS:
             text = text[:_MAX_CHARS]
 
         if text == self._last_text:
-            return {}
+            time.sleep(0.05)
+            return None
 
         self._ensure_loaded()
 
@@ -104,10 +128,30 @@ class MmsTtsPipeline(Pipeline):
         if audio.ndim != 1:
             audio = audio.reshape(-1)
 
-        sr = int(self._model.config.sampling_rate)
         self._last_text = text
 
+        # Split into chunks and queue for delivery
+        max_chunk_samples = int(_MAX_CHUNK_SECONDS * self._sample_rate)
+        total = audio.shape[0]
+        offset = 0
+        while offset < total:
+            end = min(offset + max_chunk_samples, total)
+            chunk = audio[offset:end].unsqueeze(0)  # (1, samples)
+            self._audio_queue.append(chunk)
+            offset = end
+
+        if not self._audio_queue:
+            return None
+
+        logger.info(
+            "Generated %.2fs of audio in %d chunks",
+            total / self._sample_rate,
+            len(self._audio_queue),
+        )
+
+        # Deliver the first chunk immediately
+        chunk = self._audio_queue.popleft()
         return {
-            "audio": audio.unsqueeze(0),
-            "audio_sample_rate": sr,
+            "audio": chunk,
+            "audio_sample_rate": self._sample_rate,
         }
